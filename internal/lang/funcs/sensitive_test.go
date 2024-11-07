@@ -9,8 +9,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/zclconf/go-cty/cty"
+
+	"github.com/opentofu/opentofu/internal/lang/marks"
 )
 
 func TestSensitive(t *testing.T) {
@@ -232,6 +233,61 @@ func TestIsSensitive(t *testing.T) {
 
 			if got.Equals(cty.BoolVal(test.IsSensitive)).False() {
 				t.Errorf("wrong result\ngot:  %#v\nwant: %#v", got, cty.BoolVal(test.IsSensitive))
+			}
+		})
+	}
+}
+
+func TestFlipSensitive(t *testing.T) {
+	tests := []struct {
+		Input         cty.Value
+		WantSensitive bool
+	}{
+		{
+			cty.NumberIntVal(1).Mark(marks.Sensitive),
+			false,
+		},
+		{
+			cty.NumberIntVal(1),
+			true,
+		},
+		{
+			cty.DynamicVal.Mark(marks.Sensitive),
+			false,
+		},
+		{
+			cty.DynamicVal,
+			true,
+		},
+		{
+			cty.UnknownVal(cty.String).Mark(marks.Sensitive),
+			false,
+		},
+		{
+			cty.UnknownVal(cty.String),
+			true,
+		},
+		{
+			cty.NullVal(cty.EmptyObject).Mark(marks.Sensitive),
+			false,
+		},
+		{
+			cty.NullVal(cty.EmptyObject),
+			true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("flipsensitive(%#v)", test.Input), func(t *testing.T) {
+			got, err := FlipSensitive(test.Input)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			isSensitive := got.HasMark(marks.Sensitive)
+
+			if isSensitive != test.WantSensitive {
+				t.Errorf("wrong result\ngot:  %#v\nwant: %#v", isSensitive, test.WantSensitive)
 			}
 		})
 	}

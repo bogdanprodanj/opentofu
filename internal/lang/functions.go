@@ -83,6 +83,7 @@ func (s *Scope) Functions() map[string]function.Function {
 			"filesha256":       funcs.MakeFileSha256Func(s.BaseDir),
 			"filesha512":       funcs.MakeFileSha512Func(s.BaseDir),
 			"flatten":          stdlib.FlattenFunc,
+			"flipsensitive":    funcs.FlipSensitiveFunc,
 			"floor":            stdlib.FloorFunc,
 			"format":           stdlib.FormatFunc,
 			"formatdate":       stdlib.FormatDateFunc,

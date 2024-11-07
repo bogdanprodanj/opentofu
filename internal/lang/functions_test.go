@@ -15,7 +15,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
-	homedir "github.com/mitchellh/go-homedir"
+	"github.com/mitchellh/go-homedir"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/experiments"
@@ -480,6 +480,17 @@ func TestFunctions(t *testing.T) {
 					cty.StringVal("c"),
 					cty.StringVal("d"),
 				}),
+			},
+		},
+
+		"flipsensitive": {
+			{
+				`flipsensitive(1)`,
+				cty.NumberIntVal(1).Mark(marks.Sensitive),
+			},
+			{
+				`flipsensitive(sensitive(1))`,
+				cty.NumberIntVal(1),
 			},
 		},
 

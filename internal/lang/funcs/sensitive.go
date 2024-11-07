@@ -6,9 +6,10 @@
 package funcs
 
 import (
-	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
+
+	"github.com/opentofu/opentofu/internal/lang/marks"
 )
 
 // SensitiveFunc returns a value identical to its argument except that
@@ -80,6 +81,35 @@ var IsSensitiveFunc = function.New(&function.Spec{
 	},
 })
 
+// FlipSensitiveFunc takes a value and returns the same value without sensitive marking changed.
+var FlipSensitiveFunc = function.New(&function.Spec{
+	Params: []function.Parameter{
+		{
+			Name:             "value",
+			Type:             cty.DynamicPseudoType,
+			AllowUnknown:     true,
+			AllowNull:        true,
+			AllowMarked:      true,
+			AllowDynamicType: true,
+		},
+	},
+	Type: func(args []cty.Value) (cty.Type, error) {
+		// this function only affects the value's marks, so the result
+		// type is always the same as the argument type.
+		return args[0].Type(), nil
+	},
+	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
+		if !marks.Contains(args[0], marks.Sensitive) {
+			return args[0].Mark(marks.Sensitive), nil
+		}
+
+		v, m := args[0].Unmark()
+		delete(m, marks.Sensitive)
+
+		return v.WithMarks(m), nil
+	},
+})
+
 func Sensitive(v cty.Value) (cty.Value, error) {
 	return SensitiveFunc.Call([]cty.Value{v})
 }
@@ -90,4 +120,8 @@ func Nonsensitive(v cty.Value) (cty.Value, error) {
 
 func IsSensitive(v cty.Value) (cty.Value, error) {
 	return IsSensitiveFunc.Call([]cty.Value{v})
+}
+
+func FlipSensitive(v cty.Value) (cty.Value, error) {
+	return FlipSensitiveFunc.Call([]cty.Value{v})
 }
