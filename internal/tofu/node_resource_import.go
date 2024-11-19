@@ -92,12 +92,12 @@ func (n *graphNodeImportState) Execute(ctx EvalContext, op walkOperation) (diags
 			ResolvedProvider: n.ResolvedProvider,
 		},
 	}
-	diags = diags.Append(asAbsNode.resolveProvider(ctx))
+	diags = diags.Append(asAbsNode.resolveProvider(ctx, true))
 	if diags.HasErrors() {
 		return diags
 	}
 	n.ResolvedProviderKey = asAbsNode.ResolvedProviderKey
-	log.Printf("[TRACE] graphNodeImportState: importing using %s instance %s", n.ResolvedProvider.ProviderConfig, n.ResolvedProviderKey)
+	log.Printf("[TRACE] graphNodeImportState: importing using %s", n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey))
 
 	provider, _, err := getProvider(ctx, n.ResolvedProvider.ProviderConfig, n.ResolvedProviderKey)
 	diags = diags.Append(err)

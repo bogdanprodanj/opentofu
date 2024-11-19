@@ -107,7 +107,7 @@ func (n *NodeAbstractResourceInstance) References() []*addrs.Reference {
 	return nil
 }
 
-func (n *NodeAbstractResourceInstance) resolveProvider(ctx EvalContext) tfdiags.Diagnostics {
+func (n *NodeAbstractResourceInstance) resolveProvider(ctx EvalContext, hasExpansionData bool) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
 
 	log.Printf("[TRACE] Resolving provider key for %s", n.Addr)
@@ -116,26 +116,78 @@ func (n *NodeAbstractResourceInstance) resolveProvider(ctx EvalContext) tfdiags.
 		return diags.Append(fmt.Errorf("attempting to resolve an unset provider at %s", n.Addr))
 	}
 
+	useStateFallback := false
+
+	//nolint:nestif // complexity
 	if n.ResolvedProvider.KeyExact != nil {
 		// Pass through from state
 		n.ResolvedProviderKey = n.ResolvedProvider.KeyExact
 	} else if n.ResolvedProvider.KeyExpression != nil {
+		// This path get's a bit convoluted when considering scenarios in which the configuration has been
+		// significantly altered from the state when considering fallback logic
+
 		if n.ResolvedProvider.KeyResource {
 			// Resolved from resource instance
-			n.ResolvedProviderKey, diags = resolveProviderResourceInstance(ctx, n.Config.ProviderConfigRef.KeyExpression, n.Addr)
+			validExpansion := false
+			if hasExpansionData {
+				existingExpansion := ctx.InstanceExpander().ExpandResource(n.Addr.ContainingResource())
+				for _, expanded := range existingExpansion {
+					if n.Addr.Equal(expanded) {
+						validExpansion = true
+						break
+					}
+				}
+			}
+			if validExpansion {
+				n.ResolvedProviderKey, diags = resolveProviderResourceInstance(ctx, n.Config.ProviderConfigRef.KeyExpression, n.Addr)
+			} else {
+				useStateFallback = true
+			}
 		} else {
-			// Resolved fro module instance
+			// Resolved from module instance
 			moduleInstanceForKey := n.Addr.Module[:len(n.ResolvedProvider.KeyModule)]
 			if !moduleInstanceForKey.Module().Equal(n.ResolvedProvider.KeyModule) {
 				panic(fmt.Sprintf("Invalid module key expression location %s in resource %s", n.ResolvedProvider.KeyModule, n.Addr))
 			}
 
-			n.ResolvedProviderKey, diags = resolveProviderModuleInstance(ctx, n.ResolvedProvider.KeyExpression, moduleInstanceForKey, n.Addr.String())
+			// Make sure that the configured expansion is valid for this instance
+			validExpansion := false
+			if hasExpansionData {
+				existingExpansion := ctx.InstanceExpander().ExpandModule(n.ResolvedProvider.KeyModule)
+				for _, expanded := range existingExpansion {
+					if moduleInstanceForKey.Equal(expanded) {
+						validExpansion = true
+						break
+					}
+				}
+			}
+			if validExpansion {
+				// We can use the standard resolver
+				n.ResolvedProviderKey, diags = resolveProviderModuleInstance(ctx, n.ResolvedProvider.KeyExpression, moduleInstanceForKey, n.Addr.String())
+			} else {
+				useStateFallback = true
+			}
 		}
 	}
 
 	if diags.HasErrors() {
 		return diags
+	}
+
+	if useStateFallback {
+		// We are in a orphan or destroy code path where the existing configuration / transformations have not built up the required expansion.
+		// In practice, this only happens for orphaned resource instances.  Destroy has already re-planned and overwritten state
+		if n.ResolvedProvider.ProviderConfig.String() != n.storedProviderConfig.ProviderConfig.String() {
+			// Config has been altered too severely!
+			// In this scenario, we could consider modifying the provider transformer to add optional
+			// dependencies on providers from the state to keep that provider from being pruned.
+			return diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Unable to use fallback provider from state",
+				fmt.Sprintf("Provider from configuration %s does not match provider from state %s for resource %s", n.ResolvedProvider.ProviderConfig, n.storedProviderConfig.ProviderConfig, n.Addr),
+			))
+		}
+		n.ResolvedProviderKey = n.storedProviderConfig.KeyExact
 	}
 
 	log.Printf("[TRACE] Resolved provider key for %s as %s", n.Addr, n.ResolvedProviderKey)
@@ -947,7 +999,7 @@ func (n *NodeAbstractResourceInstance) plan(
 			var buf strings.Builder
 			fmt.Fprintf(&buf,
 				"[WARN] Provider %q produced an invalid plan for %s, but we are tolerating it because it is using the legacy plugin SDK.\n    The following problems may be the cause of any confusing errors from downstream operations:",
-				n.ResolvedProvider.ProviderConfig, n.Addr,
+				n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr,
 			)
 			for _, err := range errs {
 				fmt.Fprintf(&buf, "\n      - %s", tfdiags.FormatError(err))
@@ -960,7 +1012,7 @@ func (n *NodeAbstractResourceInstance) plan(
 					"Provider produced invalid plan",
 					fmt.Sprintf(
 						"Provider %q planned an invalid value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-						n.ResolvedProvider.ProviderConfig, tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
+						n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
 					),
 				))
 			}
@@ -1024,7 +1076,7 @@ func (n *NodeAbstractResourceInstance) plan(
 					"Provider produced invalid plan",
 					fmt.Sprintf(
 						"Provider %q has indicated \"requires replacement\" on %s for a non-existent attribute path %#v.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-						n.ResolvedProvider.ProviderConfig, n.Addr, path,
+						n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr, path,
 					),
 				))
 				continue
@@ -1164,7 +1216,7 @@ func (n *NodeAbstractResourceInstance) plan(
 				"Provider produced invalid plan",
 				fmt.Sprintf(
 					"Provider %q planned an invalid value for %s%s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-					n.ResolvedProvider.ProviderConfig, n.Addr, tfdiags.FormatError(err),
+					n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr, tfdiags.FormatError(err),
 				),
 			))
 		}
@@ -1582,7 +1634,7 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 			"Provider produced invalid object",
 			fmt.Sprintf(
 				"Provider %q produced an invalid value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				n.ResolvedProvider.ProviderConfig, tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
+				n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
 			),
 		))
 	}
@@ -1596,7 +1648,7 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 			"Provider produced null object",
 			fmt.Sprintf(
 				"Provider %q produced a null value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				n.ResolvedProvider.ProviderConfig, n.Addr,
+				n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr,
 			),
 		))
 	}
@@ -1607,7 +1659,7 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 			"Provider produced invalid object",
 			fmt.Sprintf(
 				"Provider %q produced a value for %s that is not wholly known.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				n.ResolvedProvider.ProviderConfig, n.Addr,
+				n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr,
 			),
 		))
 
@@ -1682,7 +1734,7 @@ func (n *NodeAbstractResourceInstance) planDataSource(ctx EvalContext, checkRule
 	schema, _ := providerSchema.SchemaForResourceAddr(n.Addr.ContainingResource().Resource)
 	if schema == nil {
 		// Should be caught during validation, so we don't bother with a pretty error here
-		diags = diags.Append(fmt.Errorf("provider %q does not support data source %q", n.ResolvedProvider.ProviderConfig, n.Addr.ContainingResource().Resource.Type))
+		diags = diags.Append(fmt.Errorf("provider %q does not support data source %q", n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr.ContainingResource().Resource.Type))
 		return nil, nil, keyData, diags
 	}
 
@@ -1965,7 +2017,7 @@ func (n *NodeAbstractResourceInstance) applyDataSource(ctx EvalContext, planned 
 	schema, _ := providerSchema.SchemaForResourceAddr(n.Addr.ContainingResource().Resource)
 	if schema == nil {
 		// Should be caught during validation, so we don't bother with a pretty error here
-		diags = diags.Append(fmt.Errorf("provider %q does not support data source %q", n.ResolvedProvider.ProviderConfig, n.Addr.ContainingResource().Resource.Type))
+		diags = diags.Append(fmt.Errorf("provider %q does not support data source %q", n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr.ContainingResource().Resource.Type))
 		return nil, keyData, diags
 	}
 
@@ -2453,7 +2505,7 @@ func (n *NodeAbstractResourceInstance) apply(
 				"Provider produced invalid object",
 				fmt.Sprintf(
 					"Provider %q produced an invalid nil value after apply for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-					n.ResolvedProvider.ProviderConfig.String(), n.Addr.String(),
+					n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr.String(),
 				),
 			))
 		}
@@ -2466,7 +2518,7 @@ func (n *NodeAbstractResourceInstance) apply(
 			"Provider produced invalid object",
 			fmt.Sprintf(
 				"Provider %q produced an invalid value after apply for %s. The result cannot not be saved in the OpenTofu state.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				n.ResolvedProvider.ProviderConfig.String(), tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
+				n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), tfdiags.FormatErrorPrefixed(err, n.Addr.String()),
 			),
 		))
 	}
@@ -2536,7 +2588,7 @@ func (n *NodeAbstractResourceInstance) apply(
 				// to notice in the logs if an inconsistency beyond the type system
 				// leads to a downstream provider failure.
 				var buf strings.Builder
-				fmt.Fprintf(&buf, "[WARN] Provider %q produced an unexpected new value for %s, but we are tolerating it because it is using the legacy plugin SDK.\n    The following problems may be the cause of any confusing errors from downstream operations:", n.ResolvedProvider.ProviderConfig.String(), n.Addr)
+				fmt.Fprintf(&buf, "[WARN] Provider %q produced an unexpected new value for %s, but we are tolerating it because it is using the legacy plugin SDK.\n    The following problems may be the cause of any confusing errors from downstream operations:", n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), n.Addr)
 				for _, err := range errs {
 					fmt.Fprintf(&buf, "\n      - %s", tfdiags.FormatError(err))
 				}
@@ -2556,7 +2608,7 @@ func (n *NodeAbstractResourceInstance) apply(
 						"Provider produced inconsistent result after apply",
 						fmt.Sprintf(
 							"When applying changes to %s, provider %q produced an unexpected new value: %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-							n.Addr, n.ResolvedProvider.ProviderConfig.String(), tfdiags.FormatError(err),
+							n.Addr, n.ResolvedProvider.ProviderConfig.InstanceString(n.ResolvedProviderKey), tfdiags.FormatError(err),
 						),
 					))
 				}
